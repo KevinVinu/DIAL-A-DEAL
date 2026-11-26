@@ -1,0 +1,6 @@
+{
+  "name": "DIAL-a-DEAL AI",
+  "description": "Your Autonomous AI Sales Representative. Every lead deserves a conversation. Every conversation deserves a deal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
