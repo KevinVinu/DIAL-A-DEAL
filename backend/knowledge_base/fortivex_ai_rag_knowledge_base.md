@@ -41,7 +41,7 @@ This knowledge base is organised as atomic records. Each record has a stable ID,
 - **Entity:** FORTIVEX AI PRIVATE LIMITED
 - **Type:** company
 - **Category:** leadership
-- **Content:** A public company-information listing names Alisandra Shivalingegowda Jayashree and Dadadahalli Venkatesh Yashwanth as directors, with appointments reported on 15 April 2026. The sources reviewed do not explicitly verify who the CEO, founder, chairperson or managing director is. Do not identify either director as CEO without company confirmation.
+- **Content:**View Yashwanth DV is the founder and managin director of Fortivex AI
 - **Structured facts:** `{"directors": [{"name": "Alisandra Shivalingegowda Jayashree", "designation": "Director"}, {"name": "Dadadahalli Venkatesh Yashwanth", "designation": "Director"}], "ceo": "Not verified in reviewed public sources"}`
 - **Source:** https://www.companyseekers.com/company/fortivex-ai-private-limited/U85500KA2026PTC219305
 

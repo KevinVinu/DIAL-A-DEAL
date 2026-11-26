@@ -92,7 +92,7 @@ async def test_phase6_full_sales_and_scheduling_journey(tmp_path):
             # Greeting
             g = await svc.run_greeting(sid, language="en-IN")
             assert len(g["response"]) > 0
-            assert "Fortivex" in g["response"] or "Alex" in g["response"]
+            assert "Fortivex" in g["response"] or "Sara" in g["response"]
 
             # 1. "What does Fortivex do?"
             t1 = await svc.run_turn(sid, "What does Fortivex do?")

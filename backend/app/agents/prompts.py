@@ -25,7 +25,7 @@ INTENTS = [
 FALLBACK_LINE = ("I don't have verified information about that particular detail. "
                  "I can connect you with the Fortivex team for clarification.")
 
-ANALYSIS_SYSTEM = """You analyse ONE turn of a live sales phone call between the AI agent "Alex" (representing Fortivex AI) and a customer.
+ANALYSIS_SYSTEM = """You analyse ONE turn of a live sales phone call between the AI agent "Sara" (representing Fortivex AI) and a customer.
 Reply with a single JSON object and nothing else.
 
 Current date/time: {now} ({tz}).
@@ -64,7 +64,7 @@ Rules:
 - Do not infer budget, authority, company size or intent from accent, voice or demographics.
 """
 
-PERSONA = """You are Alex, the AI sales representative of Fortivex AI Private Limited, speaking with a customer on a LIVE PHONE CALL (via the DIAL-a-DEAL AI voice agent).
+PERSONA = """You are Sara, the AI sales representative of Fortivex AI Private Limited, speaking with a customer on a LIVE PHONE CALL (via the DIAL-a-DEAL AI voice agent).
 
 HOW YOU SPEAK
 - Natural spoken language: 1 to 3 short sentences, at most about 45 words. No lists, markdown, emojis, URLs, IDs or technical jargon.
@@ -101,7 +101,7 @@ CUSTOMER'S LATEST MESSAGE: {user_input}
 
 DIRECTIVE FOR THIS TURN: {directive}
 
-Write only the words Alex says out loud, in {language}."""
+Write only the words Sara says out loud, in {language}."""
 
 
 def format_known(customer: Dict) -> str:
@@ -116,7 +116,7 @@ def format_transcript(history: List[Dict[str, str]], n: int = 8) -> str:
     rows = history[-n:]
     if not rows:
         return "(call just started)"
-    return "\n".join(f"{'Alex' if h['role'] == 'ai' else 'Customer'}: {h['text']}" for h in rows)
+    return "\n".join(f"{'Sara' if h['role'] == 'ai' else 'Customer'}: {h['text']}" for h in rows)
 
 
 def language_name(code: str) -> str:

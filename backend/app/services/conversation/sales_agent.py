@@ -29,7 +29,7 @@ LANGUAGE_PROMPT_MAP = {
 def get_sales_system_prompt(language: str = "en-IN", lead_name: str = "Valued Prospect") -> str:
     lang_instruction = LANGUAGE_PROMPT_MAP.get(language, LANGUAGE_PROMPT_MAP["en-IN"])
     
-    return f"""You are 'Alex', an autonomous AI Sales Representative for DIAL-a-DEAL AI.
+    return f"""You are 'Sara', an autonomous AI Sales Representative for DIAL-a-DEAL AI.
 You are on a LIVE voice phone call right now with: {lead_name}.
 
 YOUR CORE MISSION:

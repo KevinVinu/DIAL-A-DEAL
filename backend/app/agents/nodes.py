@@ -390,7 +390,7 @@ async def greet(state: Dict[str, Any]) -> Dict[str, Any]:
     c = state.get("customer", {})
     name = c.get("name") if has_name(c) else None
     d = ("The call has just connected. Greet the caller warmly" + (f" by first name ({name.split()[0]})" if name else "") +
-         ", introduce yourself as Alex, the AI sales representative for Fortivex AI, and ask how you can help today. "
+         ", introduce yourself as Sara, the AI sales representative for Fortivex AI, and ask how you can help today. "
          "Keep it to two short sentences.")
     return {"directive": d}
 

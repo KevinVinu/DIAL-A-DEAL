@@ -82,6 +82,8 @@ class VoiceWebSocketHandler:
             lead_id=lead.id,
             language=init_language,
         )
+        active_customer_id = customer.id
+        active_lead_id = lead.id
 
         language = init_language
         context = ConversationContext(
@@ -150,69 +152,120 @@ class VoiceWebSocketHandler:
                     if not audio_chunk:
                         continue
 
-                    # Process customer speech turn through LangGraph voice pipeline
+                    # Process customer speech turn: STT first (stream transcript immediately), then LangGraph + TTS
                     async def process_turn():
+                        nonlocal active_customer_id, active_lead_id
                         try:
-                            turn_result = await self.conv_manager.process_customer_audio(
-                                context=context,
-                                audio_bytes=audio_chunk,
-                                customer_id=customer.id,
-                                lead_id=lead.id,
-                            )
+                            from app.services.stt.sarvam_stt import SUPPORTED_BCP47
 
-                            customer_text = turn_result.get("customer_text", "").strip()
+                            stt_res = await self.conv_manager.stt.transcribe_with_metadata(
+                                audio_chunk,
+                                language=context.language,
+                            )
+                            customer_text = (stt_res.transcript or "").strip()
+
+                            # Only proceed if actual speech was recognized
+                            if not customer_text or len(customer_text) <= 1:
+                                return
+
+                            was_interrupted = interruption_handler.handle_customer_speech_detected()
+                            if was_interrupted:
+                                await websocket.send_json({
+                                    "type": "interruption",
+                                    "message": "AI speech playback interrupted by customer speech."
+                                })
+
+                            CallRepository.add_message(db, call_id=call.id, speaker="customer", message=customer_text, language=language)
+                            await websocket.send_json({
+                                "type": "transcript_customer",
+                                "text": customer_text,
+                                "sender": "customer"
+                            })
+                            await websocket.send_json({"type": "ai_thinking"})
+
+                            active_lang = context.language
+                            if (not active_lang or active_lang.lower() in ("auto", "unknown")) and stt_res.detected_language in SUPPORTED_BCP47:
+                                active_lang = stt_res.detected_language
+                            elif not active_lang or active_lang.lower() in ("auto", "unknown"):
+                                active_lang = "en-IN"
+
+                            turn_result = await self.conv_manager.process_customer_text(
+                                context=context,
+                                customer_text=customer_text,
+                                customer_id=active_customer_id,
+                                lead_id=active_lead_id,
+                                active_lang=active_lang,
+                                detected_language=stt_res.detected_language or active_lang,
+                            )
+                            ag_state_ids = turn_result.get("agent_state") or {}
+                            if ag_state_ids.get("customer_id"):
+                                active_customer_id = ag_state_ids["customer_id"]
+                            if ag_state_ids.get("lead_id"):
+                                active_lead_id = ag_state_ids["lead_id"]
+
                             ai_resp_text = turn_result.get("ai_text", "")
                             resp_audio = turn_result.get("audio_bytes")
 
-                            # Only proceed if actual speech was recognized
-                            if customer_text and len(customer_text) > 1:
-                                was_interrupted = interruption_handler.handle_customer_speech_detected()
-                                if was_interrupted:
-                                    await websocket.send_json({
-                                        "type": "interruption",
-                                        "message": "AI speech playback interrupted by customer speech."
-                                    })
-
-                                CallRepository.add_message(db, call_id=call.id, speaker="customer", message=customer_text, language=language)
+                            if ai_resp_text:
+                                CallRepository.add_message(db, call_id=call.id, speaker="ai", message=ai_resp_text, language=language)
                                 await websocket.send_json({
-                                    "type": "transcript_customer",
-                                    "text": customer_text,
-                                    "sender": "customer"
+                                    "type": "ai_response",
+                                    "text": ai_resp_text,
+                                    "state": "speaking"
                                 })
 
-                                if ai_resp_text:
-                                    CallRepository.add_message(db, call_id=call.id, speaker="ai", message=ai_resp_text, language=language)
-                                    await websocket.send_json({
-                                        "type": "ai_response",
-                                        "text": ai_resp_text,
-                                        "state": "speaking"
-                                    })
+                            # If the agent is now asking for the caller's email to schedule a meeting, show the inline email box
+                            ag_state = turn_result.get("agent_state") or {}
+                            from app.agents.routing import missing_meeting_fields
+                            if ag_state.get("next_action") == "collect_meeting_details" and "email" in missing_meeting_fields(ag_state):
+                                await websocket.send_json({
+                                    "type": "request_email_input",
+                                    "prompt": "Enter your email address for the calendar invite & confirmation"
+                                })
 
-                                # If the agent is now asking for the caller's email to schedule a meeting, show the inline email box
-                                ag_state = turn_result.get("agent_state") or {}
-                                from app.agents.routing import missing_meeting_fields
-                                if ag_state.get("next_action") == "collect_meeting_details" and "email" in missing_meeting_fields(ag_state):
-                                    await websocket.send_json({
-                                        "type": "request_email_input",
-                                        "prompt": "Enter your email address for the calendar invite & confirmation"
-                                    })
-
-                                if resp_audio:
-                                    b64_out = AudioProcessor.encode_base64_chunk(resp_audio)
-                                    interruption_handler.start_speaking()
-                                    await websocket.send_json({
-                                        "type": "ai_audio",
-                                        "audio": b64_out,
-                                        "format": "mp3"
-                                    })
-                                else:
-                                    interruption_handler.stop_speaking()
+                            if resp_audio:
+                                b64_out = AudioProcessor.encode_base64_chunk(resp_audio)
+                                interruption_handler.start_speaking()
+                                await websocket.send_json({
+                                    "type": "ai_audio",
+                                    "audio": b64_out,
+                                    "format": "mp3"
+                                })
+                            else:
+                                interruption_handler.stop_speaking()
                         except (WebSocketDisconnect, RuntimeError):
                             logger.debug("[WS] Turn finished after WebSocket closed; skipping send.")
 
                     # Schedule turn processing
                     task = asyncio.create_task(process_turn())
                     interruption_handler.current_task = task
+
+                # Streaming partial audio chunk (STT-only live preview fallback)
+                elif event_type == "audio_partial":
+                    raw_b64 = payload.get("audio", "")
+                    if not raw_b64:
+                        continue
+                    partial_bytes = AudioProcessor.decode_base64_chunk(raw_b64)
+                    if not partial_bytes:
+                        continue
+
+                    async def process_partial():
+                        try:
+                            stt_res = await self.conv_manager.stt.transcribe_with_metadata(
+                                partial_bytes,
+                                language=context.language,
+                            )
+                            partial_text = (stt_res.transcript or "").strip()
+                            if partial_text:
+                                await websocket.send_json({
+                                    "type": "transcript_customer_partial",
+                                    "text": partial_text,
+                                    "sender": "customer",
+                                })
+                        except (WebSocketDisconnect, RuntimeError):
+                            pass
+
+                    asyncio.create_task(process_partial())
 
                 # Typed email / text confirmation from browser UI
                 elif event_type in ("email_input", "text_input"):
@@ -222,13 +275,19 @@ class VoiceWebSocketHandler:
                     customer_msg = f"My email address is {typed}" if event_type == "email_input" else typed
 
                     async def process_typed_turn():
+                        nonlocal active_customer_id, active_lead_id
                         try:
                             turn_result = await self.conv_manager.process_customer_text(
                                 context=context,
                                 customer_text=customer_msg,
-                                customer_id=customer.id,
-                                lead_id=lead.id,
+                                customer_id=active_customer_id,
+                                lead_id=active_lead_id,
                             )
+                            ag_state_ids = turn_result.get("agent_state") or {}
+                            if ag_state_ids.get("customer_id"):
+                                active_customer_id = ag_state_ids["customer_id"]
+                            if ag_state_ids.get("lead_id"):
+                                active_lead_id = ag_state_ids["lead_id"]
                             ai_resp_text = turn_result.get("ai_text", "")
                             resp_audio = turn_result.get("audio_bytes")
 
@@ -291,21 +350,27 @@ class VoiceWebSocketHandler:
                     lead_name=context.lead_name
                 )
 
-                # Persist extracted caller details into Customer & Lead records in DB
-                if extracted.caller_name and (not customer.full_name or customer.full_name == "Live Web Prospect"):
-                    customer.full_name = extracted.caller_name
-                if extracted.caller_age and not customer.age:
-                    customer.age = extracted.caller_age
-                if extracted.caller_company and not customer.company:
-                    customer.company = extracted.caller_company
+                # Re-fetch active Customer & Lead in case mid-call deduplication merged the initial stub row
+                active_customer = db.get(type(customer), active_customer_id)
+                active_lead = db.get(type(lead), active_lead_id)
 
-                lead.interest_level = extracted.lead_temperature
-                lead.purchase_intent = extracted.purchase_intent
-                lead.budget = extracted.budget
-                lead.notes = extracted.conversation_summary
-                lead.lead_status = "Demo Booked" if extracted.callback_requested else "Qualified"
-                if extracted.products_of_interest:
-                    lead.interested_products = ", ".join(extracted.products_of_interest)
+                # Persist extracted caller details into Customer & Lead records in DB
+                if active_customer:
+                    if extracted.caller_name and (not active_customer.full_name or active_customer.full_name == "Live Web Prospect"):
+                        active_customer.full_name = extracted.caller_name
+                    if extracted.caller_age and not active_customer.age:
+                        active_customer.age = extracted.caller_age
+                    if extracted.caller_company and not active_customer.company:
+                        active_customer.company = extracted.caller_company
+
+                if active_lead:
+                    active_lead.interest_level = extracted.lead_temperature
+                    active_lead.purchase_intent = extracted.purchase_intent
+                    active_lead.budget = extracted.budget
+                    active_lead.notes = extracted.conversation_summary
+                    active_lead.lead_status = "Demo Booked" if extracted.callback_requested else "Qualified"
+                    if extracted.products_of_interest:
+                        active_lead.interested_products = ", ".join(extracted.products_of_interest)
                 db.commit()
 
                 # End call record in database

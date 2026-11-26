@@ -116,6 +116,7 @@ export const TryItSection: React.FC = () => {
   const [selectedLanguage, setSelectedLanguage] = useState(LANGUAGES[0]);
 
   const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
+  const [liveTranscript, setLiveTranscript] = useState('');
   const [callSeconds, setCallSeconds] = useState(0);
   const [isMicActive, setIsMicActive] = useState(false);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
@@ -141,13 +142,14 @@ export const TryItSection: React.FC = () => {
   const flushUtteranceRef = useRef<(() => void) | null>(null);
   const isAiSpeakingRef = useRef<boolean>(false);
   const isRecordingLoopActiveRef = useRef<boolean>(false);
+  const speechRecognitionRef = useRef<any>(null);
 
   // Auto-scroll transcript ONLY inside its container without scrolling the browser page/window
   useEffect(() => {
     if (transcriptContainerRef.current) {
       transcriptContainerRef.current.scrollTop = transcriptContainerRef.current.scrollHeight;
     }
-  }, [transcript]);
+  }, [transcript, liveTranscript]);
 
   // Duration clock
   useEffect(() => {
@@ -228,9 +230,50 @@ export const TryItSection: React.FC = () => {
     [isSpeakerOn, stopCurrentAudio]
   );
 
+  const stopLiveSpeechRecognition = useCallback(() => {
+    try {
+      speechRecognitionRef.current?.stop();
+    } catch {}
+    speechRecognitionRef.current = null;
+  }, []);
+
+  const startLiveSpeechRecognition = useCallback((langCode: string) => {
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) return;
+    try {
+      stopLiveSpeechRecognition();
+      const recognition = new SpeechRecognitionCtor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = langCode === 'unknown' ? 'en-IN' : langCode;
+      recognition.onresult = (event: any) => {
+        if (!isMicActiveRef.current) return;
+        let combined = '';
+        for (let i = 0; i < event.results.length; i++) {
+          combined += event.results[i][0].transcript + ' ';
+        }
+        const trimmed = combined.trim();
+        if (trimmed) setLiveTranscript(trimmed);
+      };
+      recognition.onerror = () => {
+        speechRecognitionRef.current = null;
+      };
+      recognition.onend = () => {
+        speechRecognitionRef.current = null;
+      };
+      recognition.start();
+      speechRecognitionRef.current = recognition;
+    } catch {
+      speechRecognitionRef.current = null;
+    }
+  }, [stopLiveSpeechRecognition]);
+
   const cleanupCall = useCallback(() => {
     isRecordingLoopActiveRef.current = false;
     isAiSpeakingRef.current = false;
+    stopLiveSpeechRecognition();
+    setLiveTranscript('');
 
     // Stop Web Audio capture graph
     try {
@@ -260,7 +303,7 @@ export const TryItSection: React.FC = () => {
       audioContextRef.current?.close();
     } catch {}
     audioContextRef.current = null;
-  }, [stopCurrentAudio]);
+  }, [stopCurrentAudio, stopLiveSpeechRecognition]);
 
   const handleStartCall = useCallback(async () => {
     // Reset state
@@ -325,8 +368,15 @@ export const TryItSection: React.FC = () => {
             startContinuousAudioCapture(stream, ws);
             break;
 
+          case 'transcript_customer_partial':
+            if (isMicActiveRef.current && msg.text?.trim()) {
+              setLiveTranscript(msg.text.trim());
+            }
+            break;
+
           case 'transcript_customer':
             setCallState('listening');
+            setLiveTranscript('');
             if (msg.text?.trim()) addTranscriptItem('customer', msg.text.trim());
             break;
 
@@ -336,6 +386,7 @@ export const TryItSection: React.FC = () => {
 
           case 'ai_response':
             setCallState('speaking');
+            setLiveTranscript('');
             if (msg.text?.trim()) addTranscriptItem('ai', msg.text.trim());
             break;
 
@@ -417,8 +468,10 @@ export const TryItSection: React.FC = () => {
     let utteranceLen = 0;
     let spokeDuringRecording = false;
     let lastVoiceTime = 0;
+    let lastPartialSentAt = 0;
 
     const flushUtterance = () => {
+      stopLiveSpeechRecognition();
       if (utteranceLen >= minSpeechSamples && ws.readyState === WebSocket.OPEN) {
         const merged = new Float32Array(utteranceLen);
         let offset = 0;
@@ -429,10 +482,13 @@ export const TryItSection: React.FC = () => {
         const wavBuf = encodeWav16kMono(merged);
         const b64 = arrayBufferToBase64(wavBuf);
         ws.send(JSON.stringify({ type: 'audio_chunk', audio: b64, format: 'wav', sample_rate: TARGET_SAMPLE_RATE }));
+      } else {
+        setLiveTranscript('');
       }
       utteranceBuffers = [];
       utteranceLen = 0;
       spokeDuringRecording = false;
+      lastPartialSentAt = 0;
       isMicActiveRef.current = false;
       setIsMicActive(false);
       setIsUserSpeaking(false);
@@ -449,6 +505,7 @@ export const TryItSection: React.FC = () => {
           utteranceBuffers = [];
           utteranceLen = 0;
           spokeDuringRecording = false;
+          lastPartialSentAt = 0;
         }
         return;
       }
@@ -469,6 +526,25 @@ export const TryItSection: React.FC = () => {
       if (rms >= rmsThreshold) {
         spokeDuringRecording = true;
         lastVoiceTime = now;
+      }
+
+      // Fallback streaming STT over WebSocket if browser Web Speech API is unavailable
+      if (
+        !speechRecognitionRef.current &&
+        spokeDuringRecording &&
+        utteranceLen >= minSpeechSamples &&
+        now - lastPartialSentAt >= 1200
+      ) {
+        lastPartialSentAt = now;
+        const merged = new Float32Array(utteranceLen);
+        let offset = 0;
+        for (const buf of utteranceBuffers) {
+          merged.set(buf, offset);
+          offset += buf.length;
+        }
+        const wavBuf = encodeWav16kMono(merged);
+        const b64 = arrayBufferToBase64(wavBuf);
+        ws.send(JSON.stringify({ type: 'audio_partial', audio: b64, format: 'wav', sample_rate: TARGET_SAMPLE_RATE }));
       }
 
       if (utteranceLen >= maxUtteranceSamples) {
@@ -502,14 +578,16 @@ export const TryItSection: React.FC = () => {
         stopCurrentAudio();
         setCallState('listening');
       }
+      setLiveTranscript('');
       isMicActiveRef.current = true;
       setIsMicActive(true);
       setIsUserSpeaking(true);
+      startLiveSpeechRecognition(LANG_CODES[selectedLanguage] ?? 'en-IN');
     } else {
       // User clicked mic again to finish speaking & send immediately
       flushUtteranceRef.current?.();
     }
-  }, [callState, stopCurrentAudio]);
+  }, [callState, selectedLanguage, startLiveSpeechRecognition, stopCurrentAudio]);
 
   const handleSpeakerToggle = useCallback(() => {
     const nextOn = !isSpeakerOn;
@@ -785,7 +863,7 @@ export const TryItSection: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <h3 className="font-heading font-bold text-white text-base sm:text-lg">DIAL-a-DEAL AI</h3>
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 border border-white/10">
-                        Alex · AI Sales Agent
+                        Sara · AI Sales Agent
                       </span>
                     </div>
                     <div className="text-xs text-zinc-400 mt-0.5">
@@ -940,6 +1018,19 @@ export const TryItSection: React.FC = () => {
                         </div>
                       </div>
                     ))
+                  )}
+
+                  {/* Live streaming customer transcript while speaking */}
+                  {liveTranscript && (
+                    <div className="flex flex-col items-end animate-fade-in-up">
+                      <div className="flex items-center gap-1.5 mb-1 text-[10px] font-mono text-emerald-400">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                        <span>{callerName.trim() || 'You'} · Live</span>
+                      </div>
+                      <div className="max-w-[85%] p-3 rounded-2xl text-xs sm:text-[13px] leading-relaxed bg-white/90 text-black font-medium rounded-tr-xs shadow-md border border-emerald-400/40">
+                        {liveTranscript}
+                      </div>
+                    </div>
                   )}
 
                   {/* Transcript typing indicator during AI speaking */}
